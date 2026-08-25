@@ -119,24 +119,35 @@
         // Issue #64: keep the two bounds mutually constrained as the user
         // edits them, so a saved pair is never inverted (min > max) — the
         // README promises auto-adjust never crosses these bounds, which
-        // only holds for a valid interval. Whichever field the user just
-        // touched wins; the other is pulled to match rather than swapped,
-        // so the number the user typed stays in the field they typed it
-        // into. screen.js's _normalizeMasteryBounds() is a second,
-        // independent safety net for any pair that reaches it inverted
-        // regardless of how (e.g. a pre-fix persisted value).
+        // only holds for a valid interval. The field the user just edited
+        // is authoritative: its (0-100-clamped) value is always applied as
+        // typed, and if that crosses the other bound, the OTHER field is
+        // the one pulled to match (and re-persisted) — not the edited one.
+        // screen.js's _normalizeMasteryBounds() is a second, independent
+        // safety net for any pair that reaches it inverted regardless of
+        // how (e.g. a pre-fix persisted value).
         window._ddSetMinMastery = function (raw) {
+            var min = clampPct(raw, 0);
             var maxEl = document.getElementById('dd-max-mastery');
             var max = maxEl ? clampPct(maxEl.value, 100) : lsGet('maxMastery', 100);
-            var min = Math.min(clampPct(raw, 0), max);
+            if (min > max) {
+                max = min;
+                if (maxEl) maxEl.value = String(max);
+                window._ddSet('maxMastery', max);
+            }
             var minEl = document.getElementById('dd-min-mastery');
             if (minEl) minEl.value = String(min);
             window._ddSet('minMastery', min);
         };
         window._ddSetMaxMastery = function (raw) {
+            var max = clampPct(raw, 100);
             var minEl = document.getElementById('dd-min-mastery');
             var min = minEl ? clampPct(minEl.value, 0) : lsGet('minMastery', 0);
-            var max = Math.max(clampPct(raw, 100), min);
+            if (max < min) {
+                min = max;
+                if (minEl) minEl.value = String(min);
+                window._ddSet('minMastery', min);
+            }
             var maxEl = document.getElementById('dd-max-mastery');
             if (maxEl) maxEl.value = String(max);
             window._ddSet('maxMastery', max);
