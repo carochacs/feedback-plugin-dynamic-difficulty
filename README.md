@@ -7,19 +7,27 @@ difficulty indicators.
 ## What it does
 
 **Generate missing difficulty ladders**
-- Most charts (GP imports, plain single-level sloppaks) have no phrase-level
+- Many charts (GP imports, plain single-level sloppaks) have no phrase-level
   Easy/Medium/Hard data at all — `highway.hasPhraseData()` is `false` and the
   mastery slider has nothing to filter. The "⚙️ Generate Difficulties" button
   (shown automatically whenever the current song lacks phrase data) analyzes
-  every non-drum arrangement in the song independently. It uses the matching
-  fretted or keys heuristic for that arrangement, writes fresh multi-tier
-  phrase ladders directly into the sloppak on disk (`routes.py`'s `/generate`
-  route), and skips drum arrangements cleanly — after which the button
-  reconnects the highway so the new data streams in immediately.
-- A `/generate-library` route does the same as a best-effort sweep over every
-  sloppak in the DLC folder, for filling in a whole library at once.
+  every *supported* arrangement in the song independently (see instrument
+  coverage below). It uses the matching fretted or keys heuristic for that
+  arrangement, writes fresh multi-tier phrase ladders directly into the
+  sloppak on disk (`routes.py`'s `/generate` route), and explicitly skips
+  anything it doesn't support (drums, or another instrument type it doesn't
+  recognize) rather than guessing — after which the button reconnects the
+  highway so the new data streams in immediately.
+- A `/generate-library` route does the same as a best-effort sweep over the
+  sloppaks in the DLC folder, up to a `max_songs` cap (default 500, maximum
+  2000, via the request body) — it stops there rather than sweeping every
+  song in an arbitrarily large library in one call.
 - Never touches an arrangement that already has phrase data unless `force`
   is set — existing hand-authored difficulty ladders are never clobbered.
+- Both routes report `generated` / `unsupported` / `skipped` / `failed`
+  counts in their response, so a caller can tell "nothing to do" (already had
+  phrases, too little content) apart from "this generator doesn't support
+  that instrument" apart from an outright failure.
 - This is a fresh implementation against feedBack's own arrangement wire
   format (`lib/song.py`) — it does not port code from, or share a runtime
   with, the Slopsmith arrangement editor's differently-scoped difficulty
@@ -33,10 +41,18 @@ difficulty indicators.
 | Guitar / bass (fretted) | ✅ | Fret complexity, span, string-skip/hand-shape distance, tempo/syncopation-aware density, sustain-ease. Technique scoring covers bend (base + pre-bend/round-trip/shaped-curve difficulty, `bt`/`bnv`), slide, hammer-on/pull-off, tremolo, natural vs. pinch harmonic (scored independently), palm/string mute, vibrato, fret-hand mute, and bass slap/pop (scored independently, slap weighted harder). Timing thresholds (grouping window, beat tolerance, fret-jump window) scale with the song's own tempo instead of fixed wall-clock constants. |
 | Keys / piano | ✅ | Separate pitch-based heuristic (polyphony, hand-span, density, sustain-ease) — keys notes encode `midi = string*24 + fret`, so the fretted heuristic doesn't apply and never runs against them. No fret anchors/hand-shapes generated (the piano renderer doesn't consume them). |
 | Drums | ❌ | Drum parts are a `drum_tab.json` pointer, not a `notes`/`chords` file — outside this generator's data model entirely. Detected and skipped cleanly (`unsupported-instrument-drums`), never mis-scored. |
+| Anything else (vocals, harmony, notation-only, …) | ❌ | An arrangement whose `type` is a specific, non-empty value this generator doesn't recognize is rejected explicitly (`unsupported-instrument-type`) rather than silently treated as fretted. |
 
-Arrangement type is detected the same way core does: the manifest's
-`type` field (`"piano"`/`"keys"`/`"drums"`), falling back to the same
-`/^(keys|piano|keyboard|synth)/i` name match the piano-roll chart mode uses.
+Arrangement type is detected via an explicit allowlist, the same convention
+core uses: the manifest/arrangement's `type` field — `"piano"`/`"keys"` (or
+`"drums"`/`"drum"`, detected and skipped before this generator runs) for
+keys, `"lead"`/`"rhythm"`/`"bass"`/`"combo"`/`"chord"`/`"humstrum"` for
+fretted — falling back to the same `/^(keys|piano|keyboard|synth)/i` name
+match the piano-roll chart mode uses when `type` doesn't say. An **absent or
+blank** `type` still defaults to fretted (unchanged from before this fix,
+and required for compatibility: the GP importer never sets `type` on
+fretted/keys arrangements at all); a **present but unrecognized** `type` is
+the case that's now rejected explicitly instead of guessed at.
 
 **Per-song difficulty memory**
 - Core persists master-difficulty as a single global value (whatever the
@@ -110,7 +126,7 @@ All settings persist in `localStorage`, prefixed `difficulty_ladder.`.
 | Field | Value |
 |-------|-------|
 | id | `difficulty_ladder` |
-| version | 0.9.1 |
+| version | see [`plugin.json`](plugin.json) — bumped on every user-visible release, kept out of this table so it can't drift out of sync |
 | category | practice |
 
 ## Possible Upgrades
