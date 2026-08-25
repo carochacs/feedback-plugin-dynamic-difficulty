@@ -365,6 +365,104 @@ test('malformed dropResistance storage updates reset the setting to false', () =
     assert.equal(mod.settings.dropResistance, false);
 });
 
+// Issue #64: minMastery/maxMastery are persisted independently by the two
+// settings.html number inputs, so an inverted pair (min > max) can reach
+// screen.js from a stale write, a manual localStorage edit, or a race
+// between tabs. The README promises auto-adjust never crosses these
+// bounds; that only holds for a valid interval, since
+// Math.max(min, Math.min(max, next)) returns min when min > max.
+
+test('a valid persisted mastery range loads unchanged', () => {
+    const mod = freshPlugin({ stored: {
+        'difficulty_ladder.minMastery': '20',
+        'difficulty_ladder.maxMastery': '80',
+    } });
+    assert.equal(mod.settings.minMastery, 20);
+    assert.equal(mod.settings.maxMastery, 80);
+});
+
+test('an equal min/max pair loads unchanged (a valid, if degenerate, interval)', () => {
+    const mod = freshPlugin({ stored: {
+        'difficulty_ladder.minMastery': '50',
+        'difficulty_ladder.maxMastery': '50',
+    } });
+    assert.equal(mod.settings.minMastery, 50);
+    assert.equal(mod.settings.maxMastery, 50);
+});
+
+test('an inverted persisted mastery range is swapped back into a valid interval on load', () => {
+    const mod = freshPlugin({ stored: {
+        'difficulty_ladder.minMastery': '80',
+        'difficulty_ladder.maxMastery': '20',
+    } });
+    assert.equal(mod.settings.minMastery, 20);
+    assert.equal(mod.settings.maxMastery, 80);
+    assert.ok(mod.settings.minMastery <= mod.settings.maxMastery);
+});
+
+test('malformed mastery bounds fall back to the full 0..100 range', () => {
+    const mod = freshPlugin({ stored: {
+        'difficulty_ladder.minMastery': 'not-json',
+        'difficulty_ladder.maxMastery': 'not-json',
+    } });
+    assert.equal(mod.settings.minMastery, 0);
+    assert.equal(mod.settings.maxMastery, 100);
+});
+
+test('_normalizeMasteryBounds swaps an inverted in-memory pair without discarding either configured number', () => {
+    const mod = freshPlugin();
+    mod.settings.minMastery = 90;
+    mod.settings.maxMastery = 30;
+    mod._normalizeMasteryBounds();
+    assert.equal(mod.settings.minMastery, 30);
+    assert.equal(mod.settings.maxMastery, 90);
+});
+
+test('a storage event that inverts the range is normalized immediately', () => {
+    const mod = freshPlugin();
+    mod.settings.maxMastery = 40;
+
+    global.window.dispatchEvent({
+        type: 'storage',
+        key: 'difficulty_ladder.minMastery',
+        newValue: JSON.stringify(60),
+    });
+
+    assert.equal(mod.settings.minMastery, 40);
+    assert.equal(mod.settings.maxMastery, 60);
+});
+
+test('a settings-changed event that inverts the range is normalized immediately', () => {
+    const mod = freshPlugin();
+    mod.settings.minMastery = 10;
+
+    global.window.dispatchEvent({
+        type: 'difficulty_ladder:settings-changed',
+        detail: { maxMastery: 5 },
+    });
+
+    assert.equal(mod.settings.minMastery, 5);
+    assert.equal(mod.settings.maxMastery, 10);
+});
+
+test('auto-adjust never lands outside a subsequently-corrected mastery range', () => {
+    const mod = freshPlugin();
+    mod.settings.autoAdjust = true;
+    mod.settings.sensitivity = 2;
+    // Simulate the pre-fix bug directly against the clamp's inputs: an
+    // inverted pair must not survive to be read by the clamp at all.
+    mod.settings.minMastery = 90;
+    mod.settings.maxMastery = 30;
+    mod._normalizeMasteryBounds();
+    const calls = attachHighwayStub(35);
+    for (let i = 0; i < mod.WARMUP_PHRASES; i++) mod.commitPhraseResult(0.0);
+    for (let i = 1; i < mod.RAMP_PHRASES * 3; i++) mod.commitPhraseResult(0.0);
+    for (const pct of calls) {
+        assert.ok(pct >= mod.settings.minMastery && pct <= mod.settings.maxMastery,
+            `${pct} escaped the [${mod.settings.minMastery}, ${mod.settings.maxMastery}] bound`);
+    }
+});
+
 test('auto-adjust stops ramping as soon as the signal returns to neutral (no full step committed in advance)', () => {
     const mod = freshPlugin();
     mod.settings.autoAdjust = true;

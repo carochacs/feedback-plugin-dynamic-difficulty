@@ -237,6 +237,29 @@
         generateLevels: lsGet('generateLevels', 4), // 2..8 cap — phrase-ladder tier cap sent to /generate
     };
 
+    // Issue #64: minMastery/maxMastery are read and written independently
+    // (settings.html's two number inputs each call window._ddSet on their
+    // own onchange). An inverted pair (min > max — a stale write from an
+    // older plugin version, a manual localStorage edit, a race between two
+    // open tabs) breaks the "auto-adjust will never cross these bounds"
+    // invariant the README promises: the clamp below is
+    // Math.max(min, Math.min(max, next)), which returns min when min > max,
+    // i.e. a value above the configured maximum. Swapping restores a valid
+    // interval regardless of which field is "wrong" without discarding
+    // either configured number. Called on initial load and whenever either
+    // bound changes via the storage/settings-changed listeners below.
+    function _normalizeMasteryBounds() {
+        var min = settings.minMastery, max = settings.maxMastery;
+        if (typeof min !== 'number' || !isFinite(min)) min = 0;
+        if (typeof max !== 'number' || !isFinite(max)) max = 100;
+        min = Math.max(0, Math.min(100, min));
+        max = Math.max(0, Math.min(100, max));
+        if (min > max) { var tmp = min; min = max; max = tmp; }
+        settings.minMastery = min;
+        settings.maxMastery = max;
+    }
+    _normalizeMasteryBounds();
+
     function thresholds() {
         var s = Math.max(1, Math.min(3, settings.sensitivity));
         return {
@@ -1282,6 +1305,7 @@
                 settings[short] = settings[short] === true;
                 _downStreak = 0;
             }
+            if (short === 'minMastery' || short === 'maxMastery') _normalizeMasteryBounds();
             syncControlsUI();
             contributeDiagnostics();
         }
@@ -1293,6 +1317,10 @@
         if (Object.prototype.hasOwnProperty.call(patch, 'dropResistance')) {
             settings.dropResistance = patch.dropResistance === true;
             _downStreak = 0;
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, 'minMastery')
+            || Object.prototype.hasOwnProperty.call(patch, 'maxMastery')) {
+            _normalizeMasteryBounds();
         }
         syncControlsUI();
         contributeDiagnostics();
@@ -1309,6 +1337,7 @@
         module.exports = {
             thresholds, emaAlpha, songKeyOf,
             judgmentKey, settings,
+            _normalizeMasteryBounds,
             _dominantSongMastery,
             _masteryPct, _rememberSongInstrument,
             loadSongMasteryMap, saveSongMasteryMap,

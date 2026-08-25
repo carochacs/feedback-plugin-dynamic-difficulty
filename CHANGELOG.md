@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- An inverted Min/Max difficulty-bounds pair (min % > max %) no longer
+  breaks the "auto-adjust never crosses these bounds" guarantee. The pair
+  is now normalized (swapped back into a valid interval) whenever it's
+  read, changed via the settings panel, or synced across tabs, and the two
+  settings-panel inputs now constrain each other in real time so an
+  inverted pair can no longer be saved in the first place (#64).
 - `/generate-library` now computes canonical song-level section boundaries
   the same way `/generate` does, so a song's phrase boundaries no longer
   depend on which entry point generated it (#67).
