@@ -207,6 +207,33 @@ test('calculateAndEmitSectionDifficulties fills each section using the same disc
     assert.equal(verse.fillPercentage, 50); // tier 1 of 2, not the old 30%
 });
 
+test('calculateAndEmitSectionDifficulties reports 0% for a section whose only phrase has no difficulty ladder, even if other phrases in the song do', () => {
+    // Regression (Sourcery, PR #79): _tierFillFrac(mastery, 0) returns
+    // fillFrac 1 ("fully filled") for drawHud's per-phrase "no ladder"
+    // convention, but at the section level maxSectionDifficulty === 0 means
+    // "no difficulty content overlaps this section at all" (e.g. an empty
+    // section next to phrases that do have depth) -- reusing the per-phrase
+    // convention here would render an empty section as misleadingly "fully
+    // mastered". The old continuous formula always emitted 0% for this case.
+    const mod = freshPlugin();
+    global.window.highway = stubHighwayForSectionDifficulty({
+        sections: [{ time: 0, name: 'Intro' }, { time: 5, name: 'Verse' }],
+        phrases: [
+            { start_time: 0, end_time: 5, max_difficulty: 0 },
+            { start_time: 5, end_time: 20, max_difficulty: 4 },
+        ],
+        mastery: 0.6,
+    });
+    let emitted = null;
+    global.window.feedBack = { emit: (name, detail) => { emitted = { name, detail }; } };
+
+    mod.calculateAndEmitSectionDifficulties();
+
+    const intro = emitted.detail.sectionDifficulties[0];
+    assert.equal(intro.maxDifficulty, 0);
+    assert.equal(intro.fillPercentage, 0);
+});
+
 test('phrase attempt log helpers ignore malformed storage and retain an array shape', () => {
     const key = 'difficulty_ladder.phraseAttempts.v1';
     const mod = freshPlugin({ stored: { [key]: '{"not":"an array"}' } });

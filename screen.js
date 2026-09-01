@@ -604,7 +604,22 @@
                 // used a different, continuous mastery-scaled fraction here,
                 // which could disagree materially with drawHud()'s discrete
                 // tiers for the same mastery/difficulty pair.
-                var fillPercentage = _tierFillFrac(mastery, maxSectionDifficulty).fillFrac * 100;
+                //
+                // maxSectionDifficulty === 0 is handled separately rather
+                // than falling into _tierFillFrac's own zero-difficulty case:
+                // there, "no ladder to climb" means a single-tier *phrase* is
+                // presented as fully filled (drawHud's pre-existing, unchanged
+                // convention). At the *section* level it instead means "no
+                // difficulty content overlaps this section at all" (e.g. an
+                // empty/silent section next to phrases that do have depth) --
+                // reusing the phrase convention here would render an empty
+                // section as a misleadingly "fully mastered" glass, which the
+                // old continuous formula never did (it was always 0% whenever
+                // maxSectionDifficulty was 0, review-caught -- Sourcery,
+                // PR #79).
+                var fillPercentage = maxSectionDifficulty > 0
+                    ? _tierFillFrac(mastery, maxSectionDifficulty).fillFrac * 100
+                    : 0;
 
                 // Determine glass size based on section difficulty
                 var glassSize = 'medium';
