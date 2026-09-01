@@ -149,6 +149,91 @@ test('_presentedDifficultyLevel maps current mastery onto the phrase ladder leve
     assert.equal(mod._presentedDifficultyLevel({ getMastery: () => 'not-a-number' }, { max_difficulty: 3 }), null);
 });
 
+// ── Issue #63: one discrete tier formula shared by every glass renderer ────
+
+test('_tierFillFrac matches the documented discrete tier ladder', () => {
+    const mod = freshPlugin();
+    assert.deepEqual(mod._tierFillFrac(0.0, 3), { idxLevel: 0, fillFrac: 0 });
+    assert.deepEqual(mod._tierFillFrac(0.74, 3), { idxLevel: 2, fillFrac: 2 / 3 });
+    assert.deepEqual(mod._tierFillFrac(1.0, 3), { idxLevel: 3, fillFrac: 1 });
+});
+
+test('_tierFillFrac reports fully filled when there is no tier ladder to climb', () => {
+    const mod = freshPlugin();
+    assert.deepEqual(mod._tierFillFrac(0.5, 0), { idxLevel: 0, fillFrac: 1 });
+    assert.deepEqual(mod._tierFillFrac(0.5, NaN), { idxLevel: 0, fillFrac: 1 });
+    assert.deepEqual(mod._tierFillFrac(0.5, -1), { idxLevel: 0, fillFrac: 1 });
+});
+
+test('_tierFillFrac clamps out-of-range mastery instead of over/under-filling', () => {
+    const mod = freshPlugin();
+    assert.deepEqual(mod._tierFillFrac(-1, 3), { idxLevel: 0, fillFrac: 0 });
+    assert.deepEqual(mod._tierFillFrac(2, 3), { idxLevel: 3, fillFrac: 1 });
+});
+
+function stubHighwayForSectionDifficulty({ sections, phrases, mastery }) {
+    return {
+        getSections: () => sections,
+        getPhrases: () => phrases,
+        getMastery: () => mastery,
+    };
+}
+
+test('calculateAndEmitSectionDifficulties fills each section using the same discrete tier drawHud() uses', () => {
+    const mod = freshPlugin();
+    // A section whose only overlapping phrase caps at difficulty 2 (of a
+    // song-wide max of 4) is a real case the old continuous formula got
+    // wrong: mastery 0.6 against max_difficulty 2 lands on tier 1 (of 2),
+    // i.e. 50% -- not the 30% the old `mastery * maxSectionDifficulty /
+    // globalMaxDifficulty` formula would have emitted.
+    global.window.highway = stubHighwayForSectionDifficulty({
+        sections: [{ time: 0, name: 'Verse' }, { time: 10, name: 'Chorus' }],
+        phrases: [
+            { start_time: 0, end_time: 10, max_difficulty: 2 },
+            { start_time: 10, end_time: 20, max_difficulty: 4 },
+        ],
+        mastery: 0.6,
+    });
+    let emitted = null;
+    global.window.feedBack = { emit: (name, detail) => { emitted = { name, detail }; } };
+
+    mod.calculateAndEmitSectionDifficulties();
+
+    assert.equal(emitted.name, 'difficulty:sections-updated');
+    const verse = emitted.detail.sectionDifficulties[0];
+    const expected = mod._tierFillFrac(0.6, 2);
+    assert.equal(verse.maxDifficulty, 2);
+    assert.equal(verse.fillPercentage, expected.fillFrac * 100);
+    assert.equal(verse.fillPercentage, 50); // tier 1 of 2, not the old 30%
+});
+
+test('calculateAndEmitSectionDifficulties reports 0% for a section whose only phrase has no difficulty ladder, even if other phrases in the song do', () => {
+    // Regression (Sourcery, PR #79): _tierFillFrac(mastery, 0) returns
+    // fillFrac 1 ("fully filled") for drawHud's per-phrase "no ladder"
+    // convention, but at the section level maxSectionDifficulty === 0 means
+    // "no difficulty content overlaps this section at all" (e.g. an empty
+    // section next to phrases that do have depth) -- reusing the per-phrase
+    // convention here would render an empty section as misleadingly "fully
+    // mastered". The old continuous formula always emitted 0% for this case.
+    const mod = freshPlugin();
+    global.window.highway = stubHighwayForSectionDifficulty({
+        sections: [{ time: 0, name: 'Intro' }, { time: 5, name: 'Verse' }],
+        phrases: [
+            { start_time: 0, end_time: 5, max_difficulty: 0 },
+            { start_time: 5, end_time: 20, max_difficulty: 4 },
+        ],
+        mastery: 0.6,
+    });
+    let emitted = null;
+    global.window.feedBack = { emit: (name, detail) => { emitted = { name, detail }; } };
+
+    mod.calculateAndEmitSectionDifficulties();
+
+    const intro = emitted.detail.sectionDifficulties[0];
+    assert.equal(intro.maxDifficulty, 0);
+    assert.equal(intro.fillPercentage, 0);
+});
+
 test('phrase attempt log helpers ignore malformed storage and retain an array shape', () => {
     const key = 'difficulty_ladder.phraseAttempts.v1';
     const mod = freshPlugin({ stored: { [key]: '{"not":"an array"}' } });

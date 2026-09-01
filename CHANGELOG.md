@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The per-section difficulty "glass fill" emitted for feedBack-plugin-sectionmap
+  (`difficulty:sections-updated`) now uses the same discrete difficulty-tier
+  formula this plugin's own player HUD uses, instead of a different continuous
+  formula that could disagree materially for a lower-depth section (e.g. 50%
+  vs. the old 30% for the same mastery/difficulty pair). `INTEGRATION.md` is
+  rewritten to describe the real, current contract (an event `section_map`
+  consumes — not the Host-getters-only architecture both plugins' docs still
+  described after `section_map` moved off it) (#63).
 - Generation now uses an explicit allowlist for the arrangement types it
   supports (fretted: lead/rhythm/bass/combo/chord/humstrum; keys:
   piano/keys, or name-sniffed) instead of treating "non-drum" as
