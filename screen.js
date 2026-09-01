@@ -359,6 +359,25 @@
         ].join('::');
     }
 
+    // Issue #63: the discrete difficulty-tier fill math, factored out so
+    // every glass renderer -- this plugin's own player HUD (drawHud) and the
+    // per-section aggregate it emits for feedBack-plugin-sectionmap
+    // (calculateAndEmitSectionDifficulties) -- presents the same tier for
+    // the same (mastery, max_difficulty) pair. Before this fix the two used
+    // different formulas (a discrete tier here vs. a continuous
+    // mastery-scaled fraction in the emitted event) that could disagree
+    // materially for a lower-depth phrase/section.
+    // `maxDifficulty <= 0` means there's no tier ladder to climb -- nothing
+    // left to fill toward, so it's reported as fully filled (matches the
+    // pre-existing "no glass to fill toward" convention both call sites
+    // already followed for this case).
+    function _tierFillFrac(mastery, maxDifficulty) {
+        if (!isFinite(maxDifficulty) || maxDifficulty <= 0) return { idxLevel: 0, fillFrac: 1 };
+        var clamped = Math.max(0, Math.min(1, mastery));
+        var idxLevel = Math.min(maxDifficulty, Math.floor(clamped * (maxDifficulty + 1)));
+        return { idxLevel: idxLevel, fillFrac: idxLevel / maxDifficulty };
+    }
+
     function _presentedDifficultyLevel(hw, phrase) {
         const max = Number(phrase?.max_difficulty);
         let mastery;
@@ -366,7 +385,7 @@
             { check: () => !hw || !phrase || typeof hw.getMastery !== 'function', result: () => null },
             { check: () => !isFinite(max) || max <= 0, result: () => 0 },
             { check: () => { mastery = Number(hw.getMastery()); return !isFinite(mastery); }, result: () => null },
-            { check: () => true, result: () => Math.min(max, Math.floor(Math.max(0, Math.min(1, mastery)) * (max + 1))) }
+            { check: () => true, result: () => _tierFillFrac(mastery, max).idxLevel }
         ];
         const { result } = checks.find(c => c.check());
         return result();
@@ -579,8 +598,13 @@
                 var avgDifficulty = sectionDifficultiesInRange.reduce(function(a, b) { return a + b; }, 0) / sectionDifficultiesInRange.length;
                 var maxSectionDifficulty = Math.max.apply(Math, sectionDifficultiesInRange);
 
-                // Calculate fill percentage based on mastery vs max difficulty
-                var fillPercentage = maxDiff > 0 ? Math.min(100, (mastery * maxSectionDifficulty / maxDiff) * 100) : 0;
+                // Issue #63: same discrete tier formula drawHud() uses for its
+                // own per-phrase glasses, applied to this section's aggregate
+                // (max-of-overlapping-phrases) difficulty -- previously this
+                // used a different, continuous mastery-scaled fraction here,
+                // which could disagree materially with drawHud()'s discrete
+                // tiers for the same mastery/difficulty pair.
+                var fillPercentage = _tierFillFrac(mastery, maxSectionDifficulty).fillFrac * 100;
 
                 // Determine glass size based on section difficulty
                 var glassSize = 'medium';
@@ -1002,10 +1026,7 @@
         list.forEach(function (p, i2) {
             var sizeFrac = Math.max(0.3, p.max_difficulty / maxDiff);
             var glassH = GLASS_MIN_H + (GLASS_MAX_H - GLASS_MIN_H) * sizeFrac;
-            var idxLevel = p.max_difficulty > 0
-                ? Math.min(p.max_difficulty, Math.floor(mastery * (p.max_difficulty + 1)))
-                : 0;
-            var fillFrac = p.max_difficulty > 0 ? (idxLevel / p.max_difficulty) : 1;
+            var fillFrac = _tierFillFrac(mastery, p.max_difficulty).fillFrac;
             var x = i2 * (GLASS_W + GLASS_GAP);
             var y = h - glassH - 4;
             var isCurrent = (start + i2) === curIdx;
@@ -1343,7 +1364,7 @@
             loadSongMasteryMap, saveSongMasteryMap,
             loadPhraseAttempts, savePhraseAttempts,
             recordPhraseAttempt, _phraseIdOf,
-            _presentedDifficultyLevel,
+            _presentedDifficultyLevel, _tierFillFrac,
             calculateAndEmitSectionDifficulties,
             commitPhraseResult, resetPerSongState,
             rampStep, WARMUP_PHRASES, RAMP_PHRASES,
