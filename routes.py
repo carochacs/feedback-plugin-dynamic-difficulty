@@ -48,22 +48,42 @@ MAX_PROCESSING_SECONDS = 120  # hard cap per /generate-library call to bound CPU
 _KEYS_NAME_RE = re.compile(r"^(keys|piano|keyboard|synth)", re.IGNORECASE)
 
 
+_FRETTED_TYPES = frozenset({"lead", "rhythm", "bass", "combo", "chord", "humstrum"})
+_KEYS_TYPES = frozenset({"piano", "keys"})
+_DRUM_TYPES = frozenset({"drums", "drum"})
+
+
 def _instrument_kind(arr_type: str, arr_name: str) -> str:
     """Classify an arrangement for generation purposes: 'fretted', 'keys',
-    or 'drums'. Keys notes encode `midi = string*24 + fret` (no fretboard at
-    all), so the guitar/bass fret-complexity heuristic below is meaningless
-    for them and must not run — they get their own pitch/polyphony-based
-    scoring. Drums arrangements never reach this module in the first place
-    (see setup()'s manifest-entry check) since they carry no notes/chords
-    file — 'drums' here is just for a clear, honest skip reason."""
+    'drums', or 'unsupported'. Keys notes encode `midi = string*24 + fret`
+    (no fretboard at all), so the guitar/bass fret-complexity heuristic below
+    is meaningless for them and must not run — they get their own
+    pitch/polyphony-based scoring. Drums arrangements never reach this module
+    in the first place (see setup()'s manifest-entry check) since they carry
+    no notes/chords file — 'drums' here is just for a clear, honest skip
+    reason.
+
+    'unsupported' (issue #66) is an explicit allowlist miss: a *specific,
+    non-empty* type string that isn't one of the known fretted/keys/drums
+    values, e.g. a vocals/harmony/notation arrangement whose `file` happens
+    to point at something this generator can read structurally but whose
+    content this generator has no business scoring. An *absent/blank* type
+    is NOT treated as unsupported — feedpakr (the GP importer, the primary
+    source of packs in the wild) never sets `type` at all for fretted/keys
+    arrangements, so requiring a recognized value there would reject the
+    overwhelming majority of real content. Blank type keeps today's
+    behavior: name-sniffed for keys, fretted otherwise.
+    """
     t = (arr_type or "").strip().lower()
-    if t in ("piano", "keys"):
-        return "keys"
-    if t in ("drums", "drum"):
+    if t in _DRUM_TYPES:
         return "drums"
+    if t in _KEYS_TYPES:
+        return "keys"
     if _KEYS_NAME_RE.match((arr_name or "").strip()):
         return "keys"
-    return "fretted"
+    if t == "" or t in _FRETTED_TYPES:
+        return "fretted"
+    return "unsupported"
 
 
 # ── Tempo-relative constants ─────────────────────────────────────────────────
@@ -1208,6 +1228,8 @@ def generate_phrases_for_arrangement(arr, *, n_levels=4, section_times: list[flo
     kind = _instrument_kind(arr.get("type", ""), arr.get("name", ""))
     if kind == "drums":
         return None  # shouldn't normally reach here — see setup()'s pre-check
+    if kind == "unsupported":
+        return None  # explicit allowlist miss (issue #66) — see _instrument_kind
 
     notes = arr.get("notes", []) or []
     chords = arr.get("chords", []) or []
@@ -1500,6 +1522,16 @@ def _generate_one(pack_path: Path, arrangement_index: int, *, n_levels: int, for
                 "ok": True, "skipped": "unsupported-instrument-drums",
                 "arrangement_index": arrangement_index, "instrument": instrument,
             }
+        if instrument == "unsupported":
+            # Explicit allowlist miss (issue #66): a non-empty `type` this
+            # generator doesn't recognize (e.g. vocals/harmony/notation) —
+            # reported distinctly from "not enough content" so a caller can
+            # tell "this generator doesn't support this instrument" apart
+            # from "this arrangement was just too short to bother with".
+            return {
+                "ok": True, "skipped": "unsupported-instrument-type",
+                "arrangement_index": arrangement_index, "instrument": instrument,
+            }
         if not force and arr.get("phrases"):
             return {
                 "ok": True, "skipped": "already-has-phrases",
@@ -1598,19 +1630,29 @@ def _canonical_section_times(pack_path: Path, manifest: dict) -> list[float]:
     return []
 
 
+def _is_unsupported_skip(reason) -> bool:
+    """True for a skip reason meaning "this generator doesn't support this
+    arrangement's instrument" (issue #66) — drums or an explicit allowlist
+    miss — as opposed to "supported, but nothing to do" (already-has-phrases,
+    not-enough-content) or a structural problem (malformed-arrangement)."""
+    return isinstance(reason, str) and reason.startswith("unsupported-instrument")
+
+
 def _generate_song(pack_path: Path, *, n_levels: int, force: bool, log) -> dict:
     """Generate every eligible arrangement in one song.
 
     Arrangement indices are manifest/storage indices, not the player UI's
     sorted display positions.  Each arrangement is classified independently
     by ``_generate_one`` so mixed guitar/bass/keys packs work correctly and
-    drums are explicitly reported as skipped.
+    drums (or another unsupported instrument type — issue #66) are
+    explicitly reported as skipped, broken out from ``skipped`` into their
+    own ``unsupported`` count.
     """
     manifest = sloppak.load_manifest(pack_path)
     entries = manifest.get("arrangements", []) or []
     section_times = _canonical_section_times(pack_path, manifest)
     results = []
-    generated = skipped = failed = 0
+    generated = skipped = failed = unsupported = 0
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
             results.append({"arrangement_index": index, "skipped": "malformed-arrangement"})
@@ -1641,11 +1683,13 @@ def _generate_song(pack_path: Path, *, n_levels: int, force: bool, log) -> dict:
             skipped += 1
             if result.get("error"):
                 failed += 1
+            elif _is_unsupported_skip(result.get("skipped")):
+                unsupported += 1
         else:
             generated += 1
     return {
         "ok": True, "generated": generated, "skipped": skipped,
-        "failed": failed, "arrangements": results,
+        "unsupported": unsupported, "failed": failed, "arrangements": results,
     }
 
 
@@ -1723,7 +1767,7 @@ def setup(app, context):
             raise HTTPException(400, "no DLC library configured")
         root = Path(dlc_root)
 
-        generated, skipped, failed = 0, 0, []
+        generated, skipped, unsupported, failed = 0, 0, 0, []
         scanned = 0
         time_limit_reached = False
         start_time = time.monotonic()
@@ -1786,9 +1830,15 @@ def setup(app, context):
                     continue
                 if result.get("skipped"):
                     skipped += 1
+                    if _is_unsupported_skip(result.get("skipped")):
+                        unsupported += 1
                 else:
                     generated += 1
             if time_limit_reached:
                 break
 
-        return {"ok": True, "scanned": scanned, "generated": generated, "skipped": skipped, "failed": failed, "time_limit_reached": time_limit_reached}
+        return {
+            "ok": True, "scanned": scanned, "generated": generated,
+            "skipped": skipped, "unsupported": unsupported, "failed": failed,
+            "time_limit_reached": time_limit_reached,
+        }

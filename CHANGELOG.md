@@ -14,6 +14,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The per-section difficulty "glass fill" emitted for feedBack-plugin-sectionmap
+  (`difficulty:sections-updated`) now uses the same discrete difficulty-tier
+  formula this plugin's own player HUD uses, instead of a different continuous
+  formula that could disagree materially for a lower-depth section (e.g. 50%
+  vs. the old 30% for the same mastery/difficulty pair). `INTEGRATION.md` is
+  rewritten to describe the real, current contract (an event `section_map`
+  consumes — not the Host-getters-only architecture both plugins' docs still
+  described after `section_map` moved off it) (#63).
+- Generation now uses an explicit allowlist for the arrangement types it
+  supports (fretted: lead/rhythm/bass/combo/chord/humstrum; keys:
+  piano/keys, or name-sniffed) instead of treating "non-drum" as
+  equivalent to "supported" — a specific but unrecognized instrument type
+  (vocals, harmony, notation-only, ...) is now explicitly rejected
+  (`unsupported-instrument-type`) rather than silently mis-scored with the
+  fretted heuristic. An absent/blank `type` is unaffected and still
+  defaults to fretted, since the GP importer never sets it. Both
+  `/generate` and `/generate-library` now report an `unsupported` count
+  alongside `generated`/`skipped`/`failed` (#66).
+- Corrected README claims that had drifted from actual behavior: the
+  hardcoded plugin version (now points at `plugin.json` instead), and
+  `/generate-library`'s "every sloppak" description (it actually stops at
+  a `max_songs` cap, default 500/max 2000) (#66).
+- An inverted Min/Max difficulty-bounds pair (min % > max %) no longer
+  breaks the "auto-adjust never crosses these bounds" guarantee. The pair
+  is now normalized (swapped back into a valid interval) whenever it's
+  read, changed via the settings panel, or synced across tabs, and the two
+  settings-panel inputs now constrain each other in real time so an
+  inverted pair can no longer be saved in the first place (#64).
 - `/generate-library` now computes canonical song-level section boundaries
   the same way `/generate` does, so a song's phrase boundaries no longer
   depend on which entry point generated it (#67).

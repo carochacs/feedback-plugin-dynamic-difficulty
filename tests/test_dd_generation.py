@@ -344,6 +344,131 @@ def test_unsupported_drums_skip_preserves_instrument_classification():
     }
 
 
+# ── Issue #66: explicit allowlist for supported generator instruments ───────
+
+@pytest.mark.parametrize("arr_type", ["lead", "rhythm", "bass", "combo", "chord", "humstrum"])
+def test_instrument_kind_allows_every_known_fretted_type(arr_type):
+    assert routes._instrument_kind(arr_type, "some name") == "fretted"
+
+
+@pytest.mark.parametrize("arr_type", ["Lead", " RHYTHM ", "Bass"])
+def test_instrument_kind_fretted_types_are_case_and_whitespace_insensitive(arr_type):
+    assert routes._instrument_kind(arr_type, "") == "fretted"
+
+
+def test_instrument_kind_blank_type_still_falls_back_to_fretted():
+    # feedpakr (the GP importer) never sets `type` at all for fretted/keys
+    # arrangements -- an absent/blank type must keep working exactly like
+    # before this fix, or the vast majority of real packs would suddenly be
+    # reported as unsupported.
+    assert routes._instrument_kind("", "Lead") == "fretted"
+    assert routes._instrument_kind(None, "Lead") == "fretted"
+
+
+@pytest.mark.parametrize("arr_type", ["piano", "keys", "Piano", " KEYS "])
+def test_instrument_kind_allows_known_keys_types(arr_type):
+    assert routes._instrument_kind(arr_type, "some name") == "keys"
+
+
+def test_instrument_kind_still_name_sniffs_keys_when_type_is_blank():
+    assert routes._instrument_kind("", "Keys") == "keys"
+    assert routes._instrument_kind("", "Synth Pad") == "keys"
+
+
+@pytest.mark.parametrize("arr_type", ["drums", "drum", "Drums"])
+def test_instrument_kind_recognizes_drum_types(arr_type):
+    assert routes._instrument_kind(arr_type, "some name") == "drums"
+
+
+@pytest.mark.parametrize("arr_type", ["vocals", "harmony", "notation", "bonus-track", "bogus"])
+def test_instrument_kind_returns_unsupported_for_an_unrecognized_non_empty_type(arr_type):
+    # The bug: an unknown non-drum type used to fall through to the fretted
+    # heuristic (silently mis-scoring content this generator has no business
+    # reading) instead of being explicitly rejected.
+    assert routes._instrument_kind(arr_type, "some name") == "unsupported"
+
+
+def test_generate_phrases_for_arrangement_skips_an_unsupported_instrument_type():
+    arr = _arrangement(_simple_notes(0, 10, step=0.5))
+    arr["type"] = "vocals"
+    assert routes.generate_phrases_for_arrangement(arr, n_levels=4) is None
+
+
+def test_generate_one_reports_unsupported_instrument_type_distinctly_from_drums():
+    class _Lock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    fake_arr = {"type": "vocals"}
+    with patch.object(routes, "_lock_for_pack", return_value=_Lock()), \
+         patch.object(routes, "_load_manifest_and_arrangement",
+                      return_value=("arrangements/vocals.json", fake_arr, None)):
+        result = routes._generate_one(Path("unused"), 0, n_levels=4, force=False, log=None)
+
+    assert result == {
+        "ok": True,
+        "skipped": "unsupported-instrument-type",
+        "arrangement_index": 0,
+        "instrument": "unsupported",
+    }
+
+
+def test_generate_song_breaks_out_unsupported_from_generic_skipped_count():
+    manifest = {"arrangements": [{}, {}, {}]}
+    results = [
+        {"ok": True, "arrangement_index": 0, "instrument": "fretted"},
+        {"ok": True, "arrangement_index": 1, "skipped": "unsupported-instrument-drums", "instrument": "drums"},
+        {"ok": True, "arrangement_index": 2, "skipped": "unsupported-instrument-type", "instrument": "unsupported"},
+    ]
+    with patch.object(routes.sloppak, "load_manifest", return_value=manifest), patch.object(
+        routes, "_generate_one", side_effect=results
+    ):
+        summary = routes._generate_song(Path("unused"), n_levels=4, force=False, log=None)
+
+    assert summary["generated"] == 1
+    assert summary["skipped"] == 2
+    assert summary["unsupported"] == 2
+
+
+def test_generate_song_does_not_count_already_has_phrases_as_unsupported():
+    manifest = {"arrangements": [{}]}
+    results = [
+        {"ok": True, "arrangement_index": 0, "skipped": "already-has-phrases", "instrument": "fretted"},
+    ]
+    with patch.object(routes.sloppak, "load_manifest", return_value=manifest), patch.object(
+        routes, "_generate_one", side_effect=results
+    ):
+        summary = routes._generate_song(Path("unused"), n_levels=4, force=False, log=None)
+
+    assert summary["skipped"] == 1
+    assert summary["unsupported"] == 0
+
+
+def test_generate_library_route_reports_unsupported_instrument_count(tmp_path):
+    fretted = _arrangement(_simple_notes(0, 10, step=0.5), sections=[{"time": 0}, {"time": 4}])
+    vocals = _arrangement(_simple_notes(0, 10, step=0.5), sections=[{"time": 0}, {"time": 4}])
+    vocals["type"] = "vocals"
+    arrangements = [
+        ("arrangements/lead.json", fretted),
+        ("arrangements/vocals.json", vocals),
+    ]
+    dlc_root = tmp_path / "dlc"
+    dlc_root.mkdir()
+    _write_pack(dlc_root, "song.feedpak", arrangements, song_timeline_sections=[0, 5])
+
+    client = _client_for(dlc_root)
+    resp = client.post(f"/api/plugins/{routes.PLUGIN_ID}/generate-library", json={"force": True})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["generated"] == 1
+    assert body["unsupported"] == 1
+    assert body["skipped"] == 1
+
+
 def test_generate_song_processes_every_arrangement_and_keeps_going_after_a_bad_one():
     manifest = {"arrangements": [{}, {}, {}]}
     results = [

@@ -149,6 +149,91 @@ test('_presentedDifficultyLevel maps current mastery onto the phrase ladder leve
     assert.equal(mod._presentedDifficultyLevel({ getMastery: () => 'not-a-number' }, { max_difficulty: 3 }), null);
 });
 
+// ── Issue #63: one discrete tier formula shared by every glass renderer ────
+
+test('_tierFillFrac matches the documented discrete tier ladder', () => {
+    const mod = freshPlugin();
+    assert.deepEqual(mod._tierFillFrac(0.0, 3), { idxLevel: 0, fillFrac: 0 });
+    assert.deepEqual(mod._tierFillFrac(0.74, 3), { idxLevel: 2, fillFrac: 2 / 3 });
+    assert.deepEqual(mod._tierFillFrac(1.0, 3), { idxLevel: 3, fillFrac: 1 });
+});
+
+test('_tierFillFrac reports fully filled when there is no tier ladder to climb', () => {
+    const mod = freshPlugin();
+    assert.deepEqual(mod._tierFillFrac(0.5, 0), { idxLevel: 0, fillFrac: 1 });
+    assert.deepEqual(mod._tierFillFrac(0.5, NaN), { idxLevel: 0, fillFrac: 1 });
+    assert.deepEqual(mod._tierFillFrac(0.5, -1), { idxLevel: 0, fillFrac: 1 });
+});
+
+test('_tierFillFrac clamps out-of-range mastery instead of over/under-filling', () => {
+    const mod = freshPlugin();
+    assert.deepEqual(mod._tierFillFrac(-1, 3), { idxLevel: 0, fillFrac: 0 });
+    assert.deepEqual(mod._tierFillFrac(2, 3), { idxLevel: 3, fillFrac: 1 });
+});
+
+function stubHighwayForSectionDifficulty({ sections, phrases, mastery }) {
+    return {
+        getSections: () => sections,
+        getPhrases: () => phrases,
+        getMastery: () => mastery,
+    };
+}
+
+test('calculateAndEmitSectionDifficulties fills each section using the same discrete tier drawHud() uses', () => {
+    const mod = freshPlugin();
+    // A section whose only overlapping phrase caps at difficulty 2 (of a
+    // song-wide max of 4) is a real case the old continuous formula got
+    // wrong: mastery 0.6 against max_difficulty 2 lands on tier 1 (of 2),
+    // i.e. 50% -- not the 30% the old `mastery * maxSectionDifficulty /
+    // globalMaxDifficulty` formula would have emitted.
+    global.window.highway = stubHighwayForSectionDifficulty({
+        sections: [{ time: 0, name: 'Verse' }, { time: 10, name: 'Chorus' }],
+        phrases: [
+            { start_time: 0, end_time: 10, max_difficulty: 2 },
+            { start_time: 10, end_time: 20, max_difficulty: 4 },
+        ],
+        mastery: 0.6,
+    });
+    let emitted = null;
+    global.window.feedBack = { emit: (name, detail) => { emitted = { name, detail }; } };
+
+    mod.calculateAndEmitSectionDifficulties();
+
+    assert.equal(emitted.name, 'difficulty:sections-updated');
+    const verse = emitted.detail.sectionDifficulties[0];
+    const expected = mod._tierFillFrac(0.6, 2);
+    assert.equal(verse.maxDifficulty, 2);
+    assert.equal(verse.fillPercentage, expected.fillFrac * 100);
+    assert.equal(verse.fillPercentage, 50); // tier 1 of 2, not the old 30%
+});
+
+test('calculateAndEmitSectionDifficulties reports 0% for a section whose only phrase has no difficulty ladder, even if other phrases in the song do', () => {
+    // Regression (Sourcery, PR #79): _tierFillFrac(mastery, 0) returns
+    // fillFrac 1 ("fully filled") for drawHud's per-phrase "no ladder"
+    // convention, but at the section level maxSectionDifficulty === 0 means
+    // "no difficulty content overlaps this section at all" (e.g. an empty
+    // section next to phrases that do have depth) -- reusing the per-phrase
+    // convention here would render an empty section as misleadingly "fully
+    // mastered". The old continuous formula always emitted 0% for this case.
+    const mod = freshPlugin();
+    global.window.highway = stubHighwayForSectionDifficulty({
+        sections: [{ time: 0, name: 'Intro' }, { time: 5, name: 'Verse' }],
+        phrases: [
+            { start_time: 0, end_time: 5, max_difficulty: 0 },
+            { start_time: 5, end_time: 20, max_difficulty: 4 },
+        ],
+        mastery: 0.6,
+    });
+    let emitted = null;
+    global.window.feedBack = { emit: (name, detail) => { emitted = { name, detail }; } };
+
+    mod.calculateAndEmitSectionDifficulties();
+
+    const intro = emitted.detail.sectionDifficulties[0];
+    assert.equal(intro.maxDifficulty, 0);
+    assert.equal(intro.fillPercentage, 0);
+});
+
 test('phrase attempt log helpers ignore malformed storage and retain an array shape', () => {
     const key = 'difficulty_ladder.phraseAttempts.v1';
     const mod = freshPlugin({ stored: { [key]: '{"not":"an array"}' } });
@@ -363,6 +448,104 @@ test('malformed dropResistance storage updates reset the setting to false', () =
     });
 
     assert.equal(mod.settings.dropResistance, false);
+});
+
+// Issue #64: minMastery/maxMastery are persisted independently by the two
+// settings.html number inputs, so an inverted pair (min > max) can reach
+// screen.js from a stale write, a manual localStorage edit, or a race
+// between tabs. The README promises auto-adjust never crosses these
+// bounds; that only holds for a valid interval, since
+// Math.max(min, Math.min(max, next)) returns min when min > max.
+
+test('a valid persisted mastery range loads unchanged', () => {
+    const mod = freshPlugin({ stored: {
+        'difficulty_ladder.minMastery': '20',
+        'difficulty_ladder.maxMastery': '80',
+    } });
+    assert.equal(mod.settings.minMastery, 20);
+    assert.equal(mod.settings.maxMastery, 80);
+});
+
+test('an equal min/max pair loads unchanged (a valid, if degenerate, interval)', () => {
+    const mod = freshPlugin({ stored: {
+        'difficulty_ladder.minMastery': '50',
+        'difficulty_ladder.maxMastery': '50',
+    } });
+    assert.equal(mod.settings.minMastery, 50);
+    assert.equal(mod.settings.maxMastery, 50);
+});
+
+test('an inverted persisted mastery range is swapped back into a valid interval on load', () => {
+    const mod = freshPlugin({ stored: {
+        'difficulty_ladder.minMastery': '80',
+        'difficulty_ladder.maxMastery': '20',
+    } });
+    assert.equal(mod.settings.minMastery, 20);
+    assert.equal(mod.settings.maxMastery, 80);
+    assert.ok(mod.settings.minMastery <= mod.settings.maxMastery);
+});
+
+test('malformed mastery bounds fall back to the full 0..100 range', () => {
+    const mod = freshPlugin({ stored: {
+        'difficulty_ladder.minMastery': 'not-json',
+        'difficulty_ladder.maxMastery': 'not-json',
+    } });
+    assert.equal(mod.settings.minMastery, 0);
+    assert.equal(mod.settings.maxMastery, 100);
+});
+
+test('_normalizeMasteryBounds swaps an inverted in-memory pair without discarding either configured number', () => {
+    const mod = freshPlugin();
+    mod.settings.minMastery = 90;
+    mod.settings.maxMastery = 30;
+    mod._normalizeMasteryBounds();
+    assert.equal(mod.settings.minMastery, 30);
+    assert.equal(mod.settings.maxMastery, 90);
+});
+
+test('a storage event that inverts the range is normalized immediately', () => {
+    const mod = freshPlugin();
+    mod.settings.maxMastery = 40;
+
+    global.window.dispatchEvent({
+        type: 'storage',
+        key: 'difficulty_ladder.minMastery',
+        newValue: JSON.stringify(60),
+    });
+
+    assert.equal(mod.settings.minMastery, 40);
+    assert.equal(mod.settings.maxMastery, 60);
+});
+
+test('a settings-changed event that inverts the range is normalized immediately', () => {
+    const mod = freshPlugin();
+    mod.settings.minMastery = 10;
+
+    global.window.dispatchEvent({
+        type: 'difficulty_ladder:settings-changed',
+        detail: { maxMastery: 5 },
+    });
+
+    assert.equal(mod.settings.minMastery, 5);
+    assert.equal(mod.settings.maxMastery, 10);
+});
+
+test('auto-adjust never lands outside a subsequently-corrected mastery range', () => {
+    const mod = freshPlugin();
+    mod.settings.autoAdjust = true;
+    mod.settings.sensitivity = 2;
+    // Simulate the pre-fix bug directly against the clamp's inputs: an
+    // inverted pair must not survive to be read by the clamp at all.
+    mod.settings.minMastery = 90;
+    mod.settings.maxMastery = 30;
+    mod._normalizeMasteryBounds();
+    const calls = attachHighwayStub(35);
+    for (let i = 0; i < mod.WARMUP_PHRASES; i++) mod.commitPhraseResult(0.0);
+    for (let i = 1; i < mod.RAMP_PHRASES * 3; i++) mod.commitPhraseResult(0.0);
+    for (const pct of calls) {
+        assert.ok(pct >= mod.settings.minMastery && pct <= mod.settings.maxMastery,
+            `${pct} escaped the [${mod.settings.minMastery}, ${mod.settings.maxMastery}] bound`);
+    }
 });
 
 test('auto-adjust stops ramping as soon as the signal returns to neutral (no full step committed in advance)', () => {

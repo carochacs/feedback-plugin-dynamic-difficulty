@@ -14,9 +14,16 @@ not backend logic.
   top-level listener/timer/observer needs the same treatment, not a bare
   `addEventListener` outside the guard.
 - **Never touch DOM/layout on a per-frame or per-note path.** Read
-  settings once and cache them; don't call `localStorage` or `await
-  fetch(...)` synchronously inside a gameplay-event handler — that's a
-  per-note stutter waiting to happen. Debounce writes instead.
+  settings once and cache them.
+- **Don't call `localStorage` inside a gameplay-event handler.** It's a
+  synchronous main-thread read/write, so at per-note frequency it's a
+  genuine frame-blocking stutter risk. Debounce writes instead.
+- **Don't make a gameplay-event handler depend on an awaited
+  `fetch(...)`'s result.** `await` yields immediately — it can't block a
+  frame — but the handler's continuation runs a frame or more later and
+  can race with subsequent notes / act on stale state. Restructure so the
+  handler never blocks on the awaited result, rather than treating this
+  as the same "stutter" hazard as the `localStorage` case above.
 - **Suspend `requestAnimationFrame` / event subscriptions when the
   screen isn't active**, and keep state per-instance, not on a shared
   module global, so a second song/session doesn't inherit stale state.
