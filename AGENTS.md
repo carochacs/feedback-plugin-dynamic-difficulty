@@ -31,6 +31,8 @@ not backend logic.
 
 Bump `version` in `plugin.json` whenever a change is user-visible — new
 capability, a fixed bug that affected real behavior, a changed setting or
-UI flow (best-practices rule 4: bump on every release; the plugin manager
-uses this to detect updates). Patch (`0.x.y`) for fixes, minor (`0.x.0`)
-for new features, matching normal semver-during-0.x conventions.
+UI flow (best-practices rule 4: bump on every release — the version is
+used for cache-busting the served JS/CSS URL, so an unbumped version
+means users keep getting stale cached files after an update). Patch
+(`0.x.y`) for fixes, minor (`0.x.0`) for new features, matching normal
+semver-during-0.x conventions.
