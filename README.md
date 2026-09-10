@@ -4,6 +4,23 @@ A feedBack plugin that keeps a song's difficulty matched to how well you're
 actually playing it, and shows upcoming sections as a row of glass-filling
 difficulty indicators.
 
+## Multi-player and profile isolation
+
+Difficulty Ladder supports the v1 player-context model used for concurrent
+play. Each player has independent profile, song, arrangement, instrument/role,
+skill, current difficulty, best mastery, and phrase-attempt state. The model is
+designed for at least four Split Screen players and normalizes karaoke players
+to `role: "karaoke"` / `instrument: "voice"`; vocal state never shares a
+fretted-instrument record.
+
+Saved state is separated as `profile → song → arrangement → instrument → role →
+skill`. `overall` is the default skill and a missing skill may fall back to it;
+skill-specific values never overwrite `overall`. Profile-aware Hosts are gated
+until identity is ready, so a pending profile cannot accidentally read or write
+another player's progress. See [`PLAYER_CONTEXT.md`](PLAYER_CONTEXT.md) for
+the event, capability, `note_detect`, karaoke, Split Screen, and Section Map
+contract.
+
 ## What it does
 
 **Generate missing difficulty ladders**
@@ -63,6 +80,11 @@ the case that's now rejected explicitly instead of guessed at.
   still working through no longer carries one song's difficulty into the
   other. Captures both manual slider moves and this plugin's own
   auto-adjustments, for songs with phrase-level difficulty data only.
+
+The legacy single-player storage is migrated conservatively into the
+`difficulty_ladder.progress.v2` and `difficulty_ladder.phraseAttempts.v2`
+stores under `skill: "overall"`; unscoped legacy data is not claimed by
+concurrent profiles.
 
 **Live auto-adjustment**
 - Reads live per-note hit/miss judgments from whichever note-detection scorer
