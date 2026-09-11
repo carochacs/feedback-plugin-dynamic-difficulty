@@ -496,6 +496,22 @@ test('explicit concurrent contexts cannot claim unscoped legacy data', () => {
     assert.equal(mod.readProgress(ctx), null);
 });
 
+test('legacy fretted role-less difficulty matches an active lead guitar context', () => {
+    const mod = freshPlugin({ stored: {
+        'difficulty_ladder.songMastery': JSON.stringify({
+            'song.feedpak::lead': { mastery: 68, instrument: 'fretted' },
+        }),
+    } });
+    const claimant = playerContext({ compatibility_adapter: true, player_id: 'main' });
+    mod.migrateLegacyData(claimant);
+
+    const lead = playerContext({ player_id: 'main', instrument: 'guitar', role: 'lead', skill: 'overall' });
+    const migrated = mod.readProgress(lead);
+    assert.equal(migrated.currentDifficulty, 68);
+    assert.equal(migrated.legacyUnscoped, true);
+    assert.equal(migrated.legacy_claim_player_id, 'main');
+});
+
 test('malformed v2 and legacy stores fail closed to valid empty shapes', () => {
     const mod = freshPlugin({ stored: {
         'difficulty_ladder.progress.v2': '[]',

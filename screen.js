@@ -1099,6 +1099,10 @@
         return _isKaraokeRole(instrument) || /^(voice|vocals)$/i.test(instrument) ? 'karaoke' : 'instrumental';
     }
 
+    function _legacyInstrumentForValue(instrument) {
+        return /^fretted$/i.test(_id(instrument, '')) ? 'guitar' : _id(instrument, '');
+    }
+
     // Legacy storage has no profile identity. It is therefore claimed once,
     // only by a confirmed single-player compatibility context. Explicit
     // concurrent contexts never call this path. Source keys are deliberately
@@ -1116,17 +1120,19 @@
                 var currentDifficulty = _masteryPct(legacyMap[key]);
                 if (!identity || currentDifficulty === null) return;
                 var rawRecord = _plainObject(legacyMap[key]);
-                var instrument = _id(rawRecord && rawRecord.instrument, 'legacy-unknown');
+                var sourceInstrument = _id(rawRecord && rawRecord.instrument, '');
+                var instrument = _legacyInstrumentForValue(sourceInstrument) || 'legacy-unknown';
+                var sourceRole = _id(rawRecord && rawRecord.role, '');
                 var legacyContext = Object.assign({}, ctx, identity, {
                     instrument: instrument,
-                    role: _legacyRoleForInstrument(instrument),
+                    role: sourceRole || _legacyRoleForInstrument(instrument),
                     skill: 'overall',
                 });
                 var existing = _readExactProgress(progress, legacyContext);
                 if (!existing || _pct(existing.currentDifficulty) === null) {
                     _writeProgressToStore(progress, legacyContext, {
                         currentDifficulty: currentDifficulty,
-                        legacyUnscoped: !rawRecord,
+                        legacyUnscoped: !sourceRole,
                         legacy_claim_player_id: ctx.player_id,
                     });
                 }
@@ -1151,10 +1157,11 @@
                 if (!identity) return;
                 var legacyId = 'phraseAttempts.v1:' + index + ':' + _id(attempt.session_id, 'unknown');
                 var sourceInstrument = _id(attempt.instrument);
-                var instrument = sourceInstrument || 'legacy-unknown';
+                var instrument = _legacyInstrumentForValue(sourceInstrument) || 'legacy-unknown';
+                var sourceRole = _id(attempt.role);
                 var attemptContext = Object.assign({}, ctx, identity, {
                     instrument: instrument,
-                    role: _legacyRoleForInstrument(instrument),
+                    role: sourceRole || _legacyRoleForInstrument(instrument),
                     skill: 'overall',
                 });
                 var attemptNode = _phraseAttemptNode(phraseStore, attemptContext, true);
@@ -1167,9 +1174,9 @@
                     profile_id: ctx.profile_id,
                     profile_hash: ctx.profile_hash,
                     instrument: instrument,
-                    role: _legacyRoleForInstrument(instrument),
+                    role: sourceRole || _legacyRoleForInstrument(instrument),
                     skill: 'overall',
-                    legacy_unscoped_instrument: !sourceInstrument,
+                    legacy_unscoped_instrument: !sourceInstrument || !sourceRole,
                     legacy_claim_player_id: ctx.player_id,
                 }));
                 attemptNode.attempts = attemptNode.attempts.slice(-MAX_PHRASE_ATTEMPTS);
@@ -1210,7 +1217,7 @@
     function commitPhraseResult(ratio) {
         var alpha, hw;
         hw = window.highway;
-        recordPhraseAttempt(ratio);
+        recordPhraseAttempt(ratio, _mainPlayerContext, null, hw);
         _updateBestMastery(_mainPlayerContext, hw, ratio);
         alpha = emaAlpha();
         _emaHitRate = (_emaHitRate == null) ? ratio : (alpha * ratio + (1 - alpha) * _emaHitRate);

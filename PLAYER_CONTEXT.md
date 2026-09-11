@@ -121,7 +121,8 @@ After a change, Difficulty Ladder emits `difficulty:player-changed`:
 }
 ```
 
-`difficulty:sections-updated` also carries `player_context` when it is
+`difficulty:sections-updated` uses the payload schema
+`difficulty_ladder.sections.v2` and also carries `player_context` when it is
 generated for a concurrent panel. Section Map must use that context to update
 only the matching pane. A legacy main-player emission may have a null context
 while an older Host is still loading identity.
