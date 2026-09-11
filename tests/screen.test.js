@@ -276,6 +276,42 @@ test('progress v2 keeps current difficulty distinct from best mastery', () => {
 
     mod.writeProgress(ctx, { currentDifficulty: 70 });
     assert.equal(mod.readProgress(ctx).bestMastery, 48, 'difficulty writes must not overwrite long-term mastery');
+    mod.writeProgress(ctx, { bestMastery: 12 });
+    assert.equal(mod.readProgress(ctx).bestMastery, 48, 'best mastery is monotonic');
+});
+
+test('players sharing one profile keep independent progress and phrase-attempt records', () => {
+    const mod = freshPlugin();
+    const playerA = playerContext({ player_id: 'player-a' });
+    const playerB = playerContext({ player_id: 'player-b' });
+
+    assert.notEqual(mod.persistenceContextKey(playerA), mod.persistenceContextKey(playerB));
+    mod.writeProgress(playerA, { currentDifficulty: 35 });
+    mod.writeProgress(playerB, { currentDifficulty: 82 });
+    mod.savePhraseAttempts([{ phrase_id: 'a-only' }], playerA);
+    mod.savePhraseAttempts([{ phrase_id: 'b-only' }], playerB);
+
+    assert.equal(mod.readProgress(playerA).currentDifficulty, 35);
+    assert.equal(mod.readProgress(playerB).currentDifficulty, 82);
+    assert.deepEqual(mod.loadPhraseAttempts(playerA).map(x => x.phrase_id), ['a-only']);
+    assert.deepEqual(mod.loadPhraseAttempts(playerB).map(x => x.phrase_id), ['b-only']);
+
+    const progress = mod.loadProgressStore();
+    assert.deepEqual(Object.keys(progress.profiles['hash-1'].players).sort(), ['player-a', 'player-b']);
+});
+
+test('library badge scan ignores malformed role nodes in scoped progress', () => {
+    const mod = freshPlugin();
+    const main = playerContext({ player_id: 'main' });
+    mod.upsertPlayerContext(main);
+    mod.writeProgress(main, { currentDifficulty: 45 });
+    const store = mod.loadProgressStore();
+    store.profiles['hash-1'].players.main.songs['song.feedpak']
+        .arrangements.lead.instruments.guitar.roles.lead = null;
+    mod.saveProgressStore(store);
+
+    assert.doesNotThrow(() => mod._dominantSongMastery({ filename: 'song.feedpak' }));
+    assert.equal(mod._dominantSongMastery({ filename: 'song.feedpak' }), null);
 });
 
 test('four simultaneous player contexts remain independently addressable', () => {
@@ -357,6 +393,24 @@ test('player-scoped difficulty dispatch carries the complete context and persist
     assert.equal(mod.readProgress(ctx).currentDifficulty, 67);
     assert.equal(emitted[0].name, 'difficulty:player-changed');
     assert.equal(emitted[0].detail.player_context.player_id, 'player-4');
+});
+
+test('a non-true capability result falls back to the context-owned highway', () => {
+    const mod = freshPlugin();
+    const ctx = playerContext({ player_id: 'player-fallback' });
+    let mastery = 0.4;
+    global.window.feedBack = {
+        capabilities: { dispatch: () => undefined },
+        emit: () => {},
+    };
+    const highway = {
+        setMastery: value => { mastery = value; },
+        getMastery: () => mastery,
+    };
+
+    assert.equal(mod._applyDifficultyForContext(ctx, 73, highway, 'adaptive'), true);
+    assert.equal(mastery, 0.73);
+    assert.equal(mod.readProgress(ctx).currentDifficulty, 73);
 });
 
 test('section difficulty events retain the player context for pane-local rendering', () => {
@@ -489,6 +543,34 @@ test('older Host compatibility resolves only to the single legacy-default profil
     assert.equal(mod.readProgress(ctx).currentDifficulty, 44);
 });
 
+test('profile API failures are surfaced, keep writes gated, and can recover later', () => {
+    const mod = freshPlugin();
+    const events = [];
+    global.window.feedBack = {
+        playerContexts: { getActive: () => { throw new Error('profile unavailable'); } },
+        emit: (name, detail) => events.push({ name, detail }),
+    };
+
+    assert.throws(
+        () => mod.resolveCompatibilityPlayerContext({ filename: 'song.feedpak' }),
+        /profile unavailable/
+    );
+    assert.equal(mod.activateCompatibilityPlayerContext({ filename: 'song.feedpak' }), null);
+    assert.equal(mod.writeProgress(null, { currentDifficulty: 99 }), false);
+    assert.equal(events[0].name, 'difficulty:profile-context-error');
+    assert.equal(events[0].detail.player_id, 'main');
+
+    global.window.feedBack.playerContexts.getActive = () => ({
+        id: 'recovered-profile', player_hash: 'recovered-hash',
+    });
+    const recovered = mod.activateCompatibilityPlayerContext({
+        filename: 'song.feedpak', arrangement_index: 0, type: 'lead',
+    });
+    assert.equal(recovered.profile_hash, 'recovered-hash');
+    assert.equal(mod.writeProgress(recovered, { currentDifficulty: 57 }), true);
+    assert.equal(mod.readProgress(recovered).currentDifficulty, 57);
+});
+
 test('phrase-attempt caches are isolated by profile', () => {
     const mod = freshPlugin();
     const a = playerContext({ profile_hash: 'a' });
@@ -507,8 +589,81 @@ test('numeric legacy difficulty safely restores into a normal instrument context
     mod.migrateLegacyData(migrationContext);
 
     const lead = playerContext({ instrument: 'guitar', role: 'lead', skill: 'overall' });
+    const otherPlayer = playerContext({ player_id: 'player-2', instrument: 'guitar', role: 'lead' });
     assert.equal(mod.readProgress(lead).currentDifficulty, 64);
     assert.equal(mod.readProgress(lead).bestMastery, null);
+    assert.equal(mod.readProgress(lead).legacy_claim_player_id, 'player-1');
+    assert.equal(mod.readProgress(otherPlayer), null, 'only the player that claimed unscoped legacy data may read it');
+});
+
+test('finalized phrase results update monotonic best mastery without changing current difficulty', () => {
+    const mod = freshPlugin();
+    const ctx = playerContext({ player_id: 'player-mastery' });
+    let liveMastery = 0.8;
+    const highway = { getMastery: () => liveMastery };
+    const state = mod.newSplitScoreState(ctx);
+    mod.writeProgress(ctx, { currentDifficulty: 61 });
+
+    mod.commitSplitPhraseResult(state, highway, 0.5);
+    assert.equal(mod.readProgress(ctx).bestMastery, 40, '80% difficulty x 50% hit rate');
+    assert.equal(mod.readProgress(ctx).currentDifficulty, 61);
+
+    liveMastery = 0.5;
+    mod.commitSplitPhraseResult(state, highway, 0.5);
+    assert.equal(mod.readProgress(ctx).bestMastery, 40, 'a lower result cannot reduce the best ever');
+
+    liveMastery = 0.9;
+    mod.commitSplitPhraseResult(state, highway, 1);
+    assert.equal(mod.readProgress(ctx).bestMastery, 90);
+    assert.equal(mod.readProgress(ctx).currentDifficulty, 61);
+});
+
+test('main-player phrase finalization updates best mastery through the compatibility context', () => {
+    const mod = freshPlugin();
+    global.window.highway = { getMastery: () => 0.7 };
+    const ctx = mod.activateCompatibilityPlayerContext({
+        filename: 'song.feedpak', arrangement_index: 0, type: 'lead',
+    });
+
+    mod.commitPhraseResult(0.8);
+
+    assert.equal(mod.readProgress(ctx).bestMastery, 56);
+    assert.equal(mod.readProgress(ctx).currentDifficulty, null);
+});
+
+test('recordPhraseAttempt fails closed when a malformed scoped node cannot be created', () => {
+    const ctx = playerContext();
+    const malformed = {
+        schema: 'difficulty_ladder.phrase_attempts.v2', version: 2,
+        profiles: { 'hash-1': 'not-an-object' }, migrations: {},
+    };
+    const mod = freshPlugin({ stored: {
+        'difficulty_ladder.phraseAttempts.v2': JSON.stringify(malformed),
+    } });
+    const state = mod.newSplitScoreState(ctx);
+    state.curPhraseIdx = 0;
+    state.phraseTotal = 1;
+    state.phraseHits = 1;
+    const highway = {
+        getPhrases: () => [{ start_time: 0, end_time: 1, max_difficulty: 1 }],
+        getMastery: () => 0.5,
+    };
+
+    assert.doesNotThrow(() => mod.recordPhraseAttempt(1, ctx, state, highway));
+    assert.equal(mod.recordPhraseAttempt(1, ctx, state, highway), false);
+});
+
+test('recordPhraseAttempt returns false when the current phrase has no stable id', () => {
+    const mod = freshPlugin();
+    const ctx = playerContext();
+    const state = mod.newSplitScoreState(ctx);
+    state.curPhraseIdx = 3;
+    state.phraseTotal = 1;
+    state.phraseHits = 1;
+    const highway = { getPhrases: () => [], getMastery: () => 0.5 };
+
+    assert.equal(mod.recordPhraseAttempt(1, ctx, state, highway), false);
+    assert.deepEqual(mod.loadPhraseAttempts(ctx), []);
 });
 
 test('player context change resets split scorer state and restores only the new identity', () => {
@@ -566,6 +721,42 @@ test('manual override disables only the affected split-player controller', () =>
     assert.equal(masteryB, 0.55);
 });
 
+test('two untagged split panels receive distinct stable controller identities', () => {
+    const mod = freshPlugin();
+    mod.settings.autoAdjust = true;
+    let masteryA = 0.6;
+    let masteryB = 0.5;
+    const highwayA = {
+        hasPhraseData: () => false,
+        getMastery: () => masteryA,
+        setMastery: value => { masteryA = value; },
+    };
+    const highwayB = {
+        hasPhraseData: () => false,
+        getMastery: () => masteryB,
+        setMastery: value => { masteryB = value; },
+    };
+    mod.registerSplitHighway(highwayA);
+    mod.registerSplitHighway(highwayB);
+    const stateA = mod._splitScoreStateForHighway(highwayA);
+    const stateB = mod._splitScoreStateForHighway(highwayB);
+
+    assert.ok(stateA.playerKey);
+    assert.ok(stateB.playerKey);
+    assert.notEqual(stateA.playerKey, stateB.playerKey);
+    stateA.phrasesScored = 1;
+    stateA.lastObservedMasteryPct = 50;
+    mod.commitSplitPhraseResult(stateA, highwayA, 1);
+    mod.commitSplitPhraseResult(stateB, highwayB, 1);
+    mod.commitSplitPhraseResult(stateB, highwayB, 1);
+
+    assert.equal(stateA.manualOverride, true);
+    assert.equal(stateB.manualOverride, false);
+    assert.equal(masteryA, 0.6);
+    assert.equal(masteryB, 0.55, 'one untagged pane override must not disable its sibling');
+    assert.equal(mod.readProgress(playerContext()), null, 'untagged panes remain persistence-gated');
+});
+
 test('phrase attempts are isolated and capped by the complete persistence path', () => {
     const mod = freshPlugin();
     const overallGuitar = playerContext({ instrument: 'guitar', role: 'lead', skill: 'overall' });
@@ -592,6 +783,18 @@ test('player leave removes linked detector state using only stable context ids',
     assert.ok(mod._splitScoreStateForHighway(highway));
 
     assert.equal(mod.removePlayerContext({ session_id: 'session-leave', player_id: 'player-4' }), true);
+    assert.equal(mod._splitScoreStateForHighway(highway), undefined);
+});
+
+test('player leave without session_id uses the same implicit session as context upsert', () => {
+    const mod = freshPlugin();
+    const ctx = playerContext({ session_id: undefined, player_id: 'implicit-session-player' });
+    const highway = { hasPhraseData: () => false };
+    mod.registerSplitHighway(highway, ctx);
+    mod.upsertPlayerContext(ctx);
+    assert.ok(mod._splitScoreStateForHighway(highway));
+
+    assert.equal(mod.removePlayerContext({ player_id: 'implicit-session-player' }), true);
     assert.equal(mod._splitScoreStateForHighway(highway), undefined);
 });
 
@@ -624,6 +827,37 @@ test('split adaptive applies schedule pane-scoped section refresh events', async
         event.detail.player_context.player_id, event.detail.mastery,
     ]));
     assert.deepEqual(byPlayer, { 'player-a': 0.6, 'player-b': 0.7 });
+});
+
+test('main song lifecycle does not cancel a pending split-pane section refresh', async () => {
+    const mod = freshPlugin();
+    const events = [];
+    global.window.feedBack = {
+        currentSong: { filename: 'main.feedpak', arrangementIndex: 0 },
+        emit: (name, detail) => events.push({ name, detail }),
+    };
+    const splitContext = playerContext({ player_id: 'side-player', profile_hash: 'side-profile' });
+    let splitMastery = 0.5;
+    const splitHighway = {
+        hasPhraseData: () => true,
+        getSections: () => [{ time: 0 }],
+        getPhrases: () => [{ start_time: 0, end_time: 10, max_difficulty: 2 }],
+        getMastery: () => splitMastery,
+        setMastery: value => { splitMastery = value; },
+    };
+    mod._applyDifficultyForContext(splitContext, 65, splitHighway, 'adaptive');
+    global.window.highway = {
+        getSongInfo: () => ({ arrangement_index: 0, type: 'lead' }),
+        hasPhraseData: () => false,
+    };
+
+    mod.onSongEvent();
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    const splitEvents = events.filter(event => event.name === 'difficulty:sections-updated'
+        && event.detail.player_context?.player_id === 'side-player');
+    assert.equal(splitEvents.length, 1);
+    assert.equal(splitEvents[0].detail.mastery, 0.65);
 });
 
 test('only main player context events retarget global mastery persistence', () => {

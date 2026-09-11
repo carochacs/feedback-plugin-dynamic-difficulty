@@ -32,11 +32,18 @@ event payload. `skill` defaults to `overall`; future skills such as
 Persistence is nested by these dimensions:
 
 ```text
-profile → song → arrangement → instrument → role → skill
+profile → player → song → arrangement → instrument → role → skill
 ```
+
+`player_id` is deliberately persisted below the profile. Two simultaneous
+players who select the same profile still own separate progress and phrase
+attempt records.
 
 `currentDifficulty` (the live target) and `bestMastery` (the long-term best)
 are different values. A skill-specific record never overwrites `overall`.
+At each finalized phrase, mastery is calculated as
+`live difficulty percentage × judged hit rate`; `bestMastery` stores the
+monotonic maximum of those results.
 Reading a missing skill may fall back to `overall`, but an explicit instrument
 or role must never read another instrument's scoped record. The sole exception
 is an idempotently migrated v1 record that had no instrument: it is explicitly
@@ -88,9 +95,9 @@ Adaptive changes use the player-scoped capability dispatch pipeline:
 ```
 
 The complete `player_context` is included in real payloads. The request must
-target only that player's highway/arrangement. A dispatcher returns `false`
-when it cannot handle the request; the compatibility adapter may then use the
-single-player Host setter.
+target only that player's highway/arrangement. Difficulty Ladder treats only a
+literal `true` dispatcher result as acceptance; any other result falls through
+to the context-owned highway or the safe single-player compatibility setter.
 
 After a change, Difficulty Ladder emits `difficulty:player-changed`:
 
@@ -127,6 +134,11 @@ pending state, Difficulty Ladder rejects persistence writes and does not claim
 legacy data. A profile API that is present but unresolved must not silently
 fall back to a shared default profile.
 
+Profile API exceptions keep the main adapter gated and emit
+`difficulty:profile-context-error` (`difficulty_ladder.profile_context_error.v1`).
+The next song/profile lifecycle activation retries resolution; the
+`legacy-default` profile is used only when no profile API exists.
+
 The legacy adapter is allowed only when no profile-context API exists and the
 Host is operating as one main player. It uses `profile_id: "legacy-default"`
 and retains the old storage keys as recovery sources. Concurrent contexts must
@@ -135,6 +147,8 @@ never claim that unscoped legacy data.
 Player contexts are created or updated on `ready`/`changed`, and removed on
 `left`. Song, arrangement, role, or skill changes reset transient scoring state
 for that player while leaving persisted records for other contexts untouched.
+For older lifecycle producers, a `left` payload that omits `session_id` is
+matched against the same current-session default used by `ready`/`changed`.
 Pause, seek, loop, detector replacement, and highway replacement must release
 or reset transient state without changing another player's controller.
 
@@ -177,6 +191,9 @@ highway.
 - Pass the matching highway and context to the public detector factory, using
   `ownSource: true`, and emit panel/detector replacement lifecycle events.
 - Route player-scoped difficulty requests and section updates to one pane.
+- Older untagged panel registrations receive unique per-highway in-memory
+  controller identities so manual overrides cannot collide. They remain
+  persistence-gated until an explicit ready player context is supplied.
 
 ### `note_detect`
 

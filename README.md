@@ -13,8 +13,9 @@ designed for at least four Split Screen players and normalizes karaoke players
 to `role: "karaoke"` / `instrument: "voice"`; vocal state never shares a
 fretted-instrument record.
 
-Saved state is separated as `profile → song → arrangement → instrument → role →
-skill`. `overall` is the default skill and a missing skill may fall back to it;
+Saved state is separated as `profile → player → song → arrangement → instrument
+→ role → skill`. `player_id` remains part of persistence identity even when two
+local players select the same profile. `overall` is the default skill and a missing skill may fall back to it;
 skill-specific values never overwrite `overall`. Profile-aware Hosts are gated
 until identity is ready, so a pending profile cannot accidentally read or write
 another player's progress. See [`PLAYER_CONTEXT.md`](PLAYER_CONTEXT.md) for
@@ -84,7 +85,8 @@ the case that's now rejected explicitly instead of guessed at.
 The legacy single-player storage is migrated conservatively into the
 `difficulty_ladder.progress.v2` and `difficulty_ladder.phraseAttempts.v2`
 stores under `skill: "overall"`; unscoped legacy data is not claimed by
-concurrent profiles.
+concurrent profiles. A legacy record can be claimed by only one player, and its
+claim marker prevents another player sharing that profile from reading it.
 
 **Live auto-adjustment**
 - Reads live per-note hit/miss judgments from whichever note-detection scorer
@@ -93,6 +95,9 @@ concurrent profiles.
 - Tracks a rolling accuracy average per song section (phrase) and nudges the
   master-difficulty slider (`window.setMastery`) up after a run of clean
   sections, or down after a rough one.
+- Records monotonic best mastery at phrase finalization as the live difficulty
+  percentage multiplied by the phrase hit rate. This never changes the separate
+  current-difficulty target.
 - Only ever changes difficulty at section boundaries — never mid-phrase.
 - Stands down the instant you move the difficulty slider yourself. Manual
   action always wins; auto-adjust must be explicitly re-enabled afterward.

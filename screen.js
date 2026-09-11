@@ -149,7 +149,7 @@
         var ctx = normalizePlayerContext(context);
         if (!ctx) return null;
         return [
-            _profileKey(ctx), _nodeKey(ctx.song_id), _nodeKey(ctx.arrangement_id),
+            _profileKey(ctx), _nodeKey(ctx.player_id), _nodeKey(ctx.song_id), _nodeKey(ctx.arrangement_id),
             _nodeKey(ctx.instrument), _nodeKey(ctx.role), _nodeKey(ctx.skill),
         ].join('::');
     }
@@ -157,6 +157,23 @@
     function _profileKey(context) {
         var ctx = normalizePlayerContext(context);
         return ctx ? _nodeKey(ctx.profile_hash || ctx.profile_id) : null;
+    }
+
+    function _profilePlayerNode(profile, context, create) {
+        var ctx = normalizePlayerContext(context);
+        if (!ctx || !_plainObject(profile)) return null;
+        if (!_plainObject(profile.players)) {
+            if (!create) return null;
+            profile.players = {};
+        }
+        var playerKey = _nodeKey(ctx.player_id);
+        var player = profile.players[playerKey];
+        if (!player && create) player = profile.players[playerKey] = {
+            player_id: ctx.player_id, songs: {},
+        };
+        if (!_plainObject(player) || (!_plainObject(player.songs) && !create)) return null;
+        if (!_plainObject(player.songs)) player.songs = {};
+        return player;
     }
 
     function _emptyProgressStore() {
@@ -187,11 +204,12 @@
         var profileKey = _profileKey(ctx);
         var profile = store.profiles[profileKey];
         if (!profile && create) profile = store.profiles[profileKey] = {
-            profile_id: ctx.profile_id, profile_hash: ctx.profile_hash, songs: {},
+            profile_id: ctx.profile_id, profile_hash: ctx.profile_hash, players: {},
         };
-        if (!_plainObject(profile) || !_plainObject(profile.songs)) return null;
-        var songKey = _nodeKey(ctx.song_id), songNode = profile.songs[songKey];
-        if (!songNode && create) songNode = profile.songs[songKey] = { song_id: ctx.song_id, arrangements: {} };
+        var player = _profilePlayerNode(profile, ctx, create);
+        if (!player) return null;
+        var songKey = _nodeKey(ctx.song_id), songNode = player.songs[songKey];
+        if (!songNode && create) songNode = player.songs[songKey] = { song_id: ctx.song_id, arrangements: {} };
         if (!_plainObject(songNode) || !_plainObject(songNode.arrangements)) return null;
         var arrangementKey = _nodeKey(ctx.arrangement_id), arrangementNode = songNode.arrangements[arrangementKey];
         if (!arrangementNode && create) arrangementNode = songNode.arrangements[arrangementKey] = {
@@ -225,12 +243,17 @@
         }
         if (Object.prototype.hasOwnProperty.call(patch, 'bestMastery')) {
             var mastery = _pct(patch.bestMastery);
-            if (mastery !== null && node.bestMastery !== mastery) {
+            var previousBest = _pct(node.bestMastery);
+            if (mastery !== null && (previousBest === null || mastery > previousBest)) {
                 node.bestMastery = mastery; changed = true;
             }
         }
         if (patch.legacyUnscoped === true && node.legacyUnscoped !== true) {
             node.legacyUnscoped = true; changed = true;
+        }
+        if (patch.legacy_claim_player_id
+            && node.legacy_claim_player_id !== patch.legacy_claim_player_id) {
+            node.legacy_claim_player_id = patch.legacy_claim_player_id; changed = true;
         }
         if (changed) node.updatedAt = patch.updatedAt || new Date().toISOString();
         return changed;
@@ -260,7 +283,8 @@
         // marked unscoped migration may seed any normal context for the same
         // profile/song/arrangement; scoped records never cross-read.
         var profile = store.profiles[_profileKey(ctx)];
-        var songNode = profile && profile.songs && profile.songs[_nodeKey(ctx.song_id)];
+        var player = _profilePlayerNode(profile, ctx, false);
+        var songNode = player && player.songs[_nodeKey(ctx.song_id)];
         var arrangementNode = songNode && songNode.arrangements && songNode.arrangements[_nodeKey(ctx.arrangement_id)];
         var matches = [];
         var instruments = arrangementNode && arrangementNode.instruments;
@@ -270,7 +294,8 @@
             Object.keys(roles).forEach(function (rk) {
                 var skills = roles[rk] && roles[rk].skills;
                 var node = skills && (skills[_nodeKey(ctx.skill)] || skills[_nodeKey('overall')]);
-                if (_plainObject(node) && node.legacyUnscoped === true) matches.push(node);
+                if (_plainObject(node) && node.legacyUnscoped === true
+                    && node.legacy_claim_player_id === ctx.player_id) matches.push(node);
             });
         });
         return matches.length === 1 ? matches[0] : null;
@@ -334,7 +359,8 @@
         if (_mainPlayerContext) {
             var ctx = Object.assign({}, _mainPlayerContext, { song_id: song.filename, skill: 'overall' });
             var profile = loadProgressStore().profiles[_profileKey(ctx)];
-            var songNode = profile && profile.songs && profile.songs[_nodeKey(song.filename)];
+            var player = _profilePlayerNode(profile, ctx, false);
+            var songNode = player && player.songs[_nodeKey(song.filename)];
             var fallbackV2 = null;
             var arrangements = songNode && songNode.arrangements;
             if (_plainObject(arrangements)) {
@@ -345,7 +371,9 @@
                         var roles = instruments[ik] && instruments[ik].roles;
                         if (!_plainObject(roles)) return;
                         Object.keys(roles).forEach(function (rk) {
-                            var node = roles[rk].skills && roles[rk].skills[_nodeKey('overall')];
+                            var roleNode = _plainObject(roles[rk]);
+                            var skills = roleNode && _plainObject(roleNode.skills);
+                            var node = skills && skills[_nodeKey('overall')];
                             var value = node && _pct(node.currentDifficulty);
                             if (value === null) return;
                             if (arrangements[ak].arrangement_id === '0') fallbackV2 = value;
@@ -585,19 +613,34 @@
     function resolveCompatibilityPlayerContext(si) {
         var fb = window.feedBack;
         var value;
-        try {
-            if (fb && fb.playerContexts && typeof fb.playerContexts.getActive === 'function') {
-                value = fb.playerContexts.getActive('main');
-            } else if (window.v3Profile && typeof window.v3Profile.get === 'function') {
-                value = window.v3Profile.get();
-            } else {
-                return _compatibilityContext({ id: 'legacy-default' }, si);
-            }
-        } catch (_) { return null; }
+        if (fb && fb.playerContexts && typeof fb.playerContexts.getActive === 'function') {
+            value = fb.playerContexts.getActive('main');
+        } else if (window.v3Profile && typeof window.v3Profile.get === 'function') {
+            value = window.v3Profile.get();
+        } else {
+            return _compatibilityContext({ id: 'legacy-default' }, si);
+        }
         if (value && typeof value.then === 'function') {
-            return value.then(function (profile) { return _compatibilityContext(profile, si); }, function () { return null; });
+            return value.then(function (profile) { return _compatibilityContext(profile, si); });
         }
         return _compatibilityContext(value, si);
+    }
+
+    function _reportCompatibilityProfileError(error, token) {
+        if (token !== _mainContextResolution) return null;
+        var message = error && error.message ? String(error.message) : String(error || 'unknown profile error');
+        if (window.console && typeof window.console.warn === 'function') {
+            window.console.warn('[difficulty_ladder] main profile context resolution failed:', error);
+        }
+        var fb = window.feedBack;
+        if (fb && typeof fb.emit === 'function') fb.emit('difficulty:profile-context-error', {
+            schema: 'difficulty_ladder.profile_context_error.v1',
+            player_id: 'main',
+            message: message,
+        });
+        // Keep persistence and unscoped Section Map output gated. A later
+        // song/profile lifecycle activation gets a fresh token and can recover.
+        return null;
     }
 
     function _acceptMainPlayerContext(context, token) {
@@ -614,9 +657,17 @@
     function activateCompatibilityPlayerContext(si) {
         var token = ++_mainContextResolution;
         _mainPlayerContext = null; // gate writes while a new identity resolves
-        var resolved = resolveCompatibilityPlayerContext(si);
+        var resolved;
+        try {
+            resolved = resolveCompatibilityPlayerContext(si);
+        } catch (error) {
+            return _reportCompatibilityProfileError(error, token);
+        }
         if (resolved && typeof resolved.then === 'function') {
-            return resolved.then(function (context) { return _acceptMainPlayerContext(context, token); });
+            return resolved.then(
+                function (context) { return _acceptMainPlayerContext(context, token); },
+                function (error) { return _reportCompatibilityProfileError(error, token); }
+            );
         }
         return _acceptMainPlayerContext(resolved, token);
     }
@@ -670,7 +721,13 @@
 
     function removePlayerContext(raw) {
         raw = _plainObject(raw && raw.context) || raw;
-        var key = playerContextKey(raw);
+        raw = _plainObject(raw) || {};
+        // left payloads need only identify the session/player pair. Match the
+        // same implicit session used by normalizePlayerContext during upsert.
+        var key = playerContextKey({
+            session_id: _id(raw.session_id ?? raw.sessionId, _sessionId),
+            player_id: raw.player_id ?? raw.playerId,
+        });
         if (!key) return false;
         _splitScoreStates.forEach(function (state, hw) {
             if (state.playerKey === key) _splitScoreStates.delete(hw);
@@ -727,7 +784,7 @@
                     action: 'set', player_context: _contextEventPayload(ctx),
                     current_difficulty: value, reason: reason || 'adaptive',
                 });
-                if (dispatched !== false) {
+                if (dispatched === true) {
                     writeProgress(ctx, { currentDifficulty: value });
                     _emitPlayerDifficultyChanged(ctx, value, reason);
                     scheduleSectionDifficultiesEmit(ctx, hw);
@@ -883,12 +940,12 @@
         if (!ctx) return null;
         var profileKey = _profileKey(ctx), profile = store.profiles[profileKey];
         if (!profile && create) profile = store.profiles[profileKey] = {
-            profile_id: ctx.profile_id, profile_hash: ctx.profile_hash, songs: {},
+            profile_id: ctx.profile_id, profile_hash: ctx.profile_hash, players: {},
         };
-        if (!_plainObject(profile) || (!_plainObject(profile.songs) && !create)) return null;
-        if (!_plainObject(profile.songs)) profile.songs = {};
-        var songKey = _nodeKey(ctx.song_id), songNode = profile.songs[songKey];
-        if (!songNode && create) songNode = profile.songs[songKey] = { song_id: ctx.song_id, arrangements: {} };
+        var player = _profilePlayerNode(profile, ctx, create);
+        if (!player) return null;
+        var songKey = _nodeKey(ctx.song_id), songNode = player.songs[songKey];
+        if (!songNode && create) songNode = player.songs[songKey] = { song_id: ctx.song_id, arrangements: {} };
         if (!_plainObject(songNode) || (!_plainObject(songNode.arrangements) && !create)) return null;
         if (!_plainObject(songNode.arrangements)) songNode.arrangements = {};
         var arrangementKey = _nodeKey(ctx.arrangement_id), arrangementNode = songNode.arrangements[arrangementKey];
@@ -918,7 +975,8 @@
         var ctx = normalizePlayerContext(context);
         if (!ctx || ctx.skill !== 'overall') return [];
         var profile = store.profiles[_profileKey(ctx)];
-        var songNode = profile && profile.songs && profile.songs[_nodeKey(ctx.song_id)];
+        var player = _profilePlayerNode(profile, ctx, false);
+        var songNode = player && player.songs[_nodeKey(ctx.song_id)];
         var arrangementNode = songNode && songNode.arrangements
             && songNode.arrangements[_nodeKey(ctx.arrangement_id)];
         var instruments = arrangementNode && arrangementNode.instruments;
@@ -994,8 +1052,9 @@
         const phrase = hw.getPhrases?.()?.[phraseIdx];
         const scopedSongKey = context.song_id + '::' + context.arrangement_id;
         const phraseId = _phraseIdOf(scopedSongKey, phraseIdx, phrase);
-        if (!phraseId) return;
+        if (!phraseId) return false;
         var attemptNode = _phraseAttemptNode(loadPhraseAttemptStore(), context, true);
+        if (!attemptNode) return false;
         const attempts = attemptNode.attempts;
         attempts.push({
             schema: 'difficulty_ladder.phrase_attempt.v2',
@@ -1068,11 +1127,13 @@
                     _writeProgressToStore(progress, legacyContext, {
                         currentDifficulty: currentDifficulty,
                         legacyUnscoped: !rawRecord,
+                        legacy_claim_player_id: ctx.player_id,
                     });
                 }
             });
             progress.migrations.songMasteryV1 = {
-                completed: true, claimed_by: claimedBy, source_retained: true,
+                completed: true, claimed_by: claimedBy, claimed_player_id: ctx.player_id,
+                source_retained: true,
                 completed_at: new Date().toISOString(),
             };
             saveProgressStore(progress);
@@ -1097,6 +1158,7 @@
                     skill: 'overall',
                 });
                 var attemptNode = _phraseAttemptNode(phraseStore, attemptContext, true);
+                if (!attemptNode) return;
                 if (attemptNode.attempts.some(function (item) { return item && item.legacy_id === legacyId; })) return;
                 attemptNode.attempts.push(Object.assign({}, attempt, identity, {
                     schema: 'difficulty_ladder.phrase_attempt.v2',
@@ -1113,7 +1175,8 @@
                 attemptNode.attempts = attemptNode.attempts.slice(-MAX_PHRASE_ATTEMPTS);
             });
             phraseStore.migrations.phraseAttemptsV1 = {
-                completed: true, claimed_by: claimedBy, source_retained: true,
+                completed: true, claimed_by: claimedBy, claimed_player_id: ctx.player_id,
+                source_retained: true,
                 completed_at: new Date().toISOString(),
             };
             _phraseAttemptsDirty = true;
@@ -1122,9 +1185,33 @@
         return true;
     }
 
+    // A finalized phrase's mastery is the difficulty that was actually
+    // presented (the live 0..100 slider) multiplied by its judged hit rate.
+    // This keeps a clean phrase at 70% difficulty worth 70 mastery, while a
+    // 50% result at that difficulty is worth 35. bestMastery is monotonic and
+    // never changes the independently persisted currentDifficulty target.
+    function _phraseMasteryPct(highway, ratio) {
+        if (!highway || typeof highway.getMastery !== 'function') return null;
+        var hitRate = Number(ratio);
+        var difficulty = Number(highway.getMastery());
+        if (!isFinite(hitRate) || !isFinite(difficulty)) return null;
+        hitRate = Math.max(0, Math.min(1, hitRate));
+        difficulty = Math.max(0, Math.min(1, difficulty));
+        return Math.round(difficulty * 100 * hitRate * 100) / 100;
+    }
+
+    function _updateBestMastery(context, highway, ratio) {
+        var ctx = normalizePlayerContext(context);
+        var mastery = _phraseMasteryPct(highway, ratio);
+        if (!ctx || mastery === null) return false;
+        return writeProgress(ctx, { bestMastery: mastery });
+    }
+
     function commitPhraseResult(ratio) {
         var alpha, hw;
+        hw = window.highway;
         recordPhraseAttempt(ratio);
+        _updateBestMastery(_mainPlayerContext, hw, ratio);
         alpha = emaAlpha();
         _emaHitRate = (_emaHitRate == null) ? ratio : (alpha * ratio + (1 - alpha) * _emaHitRate);
         // Counts every phrase actually played this song, regardless of
@@ -1138,7 +1225,6 @@
             contributeDiagnostics();
             return;
         }
-        hw = window.highway;
         if (!hw || typeof hw.getMastery !== 'function') {
             _rampDirection = null;
             _rampProgress = 0;
@@ -1472,6 +1558,20 @@
     var _splitScoreStates = new Map();
     var _splitPanelsUnsubscribe = null;
     var _playerContextUnsubscribers = [];
+    var _untaggedSplitKeys = new WeakMap();
+    var _untaggedSplitSequence = 0;
+
+    function _splitRegistrationKey(hw, context) {
+        var scoped = playerContextKey(context);
+        if (scoped) return scoped;
+        if (!hw || (typeof hw !== 'object' && typeof hw !== 'function')) return null;
+        var fallback = _untaggedSplitKeys.get(hw);
+        if (!fallback) {
+            fallback = 'untagged-split::panel-' + (++_untaggedSplitSequence);
+            _untaggedSplitKeys.set(hw, fallback);
+        }
+        return fallback;
+    }
 
     function _resetSplitScoreState(state, context, stableKey) {
         state.judgedKeys = new Set();
@@ -1501,7 +1601,10 @@
     function registerSplitHighway(hw, context) {
         if (!hw) return;
         var normalized = normalizePlayerContext(context);
-        var stableKey = playerContextKey(context);
+        // Older Split Screen builds supplied only a highway. Give each such
+        // pane an in-memory identity so scorer/manual-override state cannot
+        // collide, but keep context null so untagged panes cannot persist.
+        var stableKey = _splitRegistrationKey(hw, normalized || context);
         if (stableKey) {
             _splitScoreStates.forEach(function (state, registeredHighway) {
                 if (registeredHighway !== hw && state.playerKey === stableKey) {
@@ -1600,6 +1703,7 @@
     }
 
     function commitSplitPhraseResult(state, hw, ratio) {
+        _updateBestMastery(state && state.context, hw, ratio);
         var alpha = emaAlpha();
         state.emaHitRate = state.emaHitRate == null ? ratio : alpha * ratio + (1 - alpha) * state.emaHitRate;
         state.phrasesScored++;
@@ -2040,6 +2144,7 @@
 
     function onSongEvent() {
         ensureMasterySaveHook();
+        var previousMainContext = _mainPlayerContext;
         var hw = window.highway;
         var si = (hw && typeof hw.getSongInfo === 'function') ? hw.getSongInfo() : null;
         var identity = Object.assign({}, si || {}, _songContextFields(si));
@@ -2064,7 +2169,13 @@
         // still-pending debounced emit from the previous song first, so a
         // stray trailing-edge fire can't immediately re-emit stale data for
         // the song we just navigated away from.
-        cancelSectionDifficultiesEmit();
+        // Song navigation owns only the compatibility/main pane. Split panes
+        // have independent lifecycle and trailing section refreshes that must
+        // survive a main-player song event.
+        cancelSectionDifficultiesEmit(previousMainContext || {
+            session_id: _sessionId, player_id: 'main',
+        });
+        if (_mainPlayerContext) cancelSectionDifficultiesEmit(_mainPlayerContext);
         // A profile-aware Host may still be resolving v3Profile/getActive.
         // Emitting now would publish this pane with player_context: null and
         // let Section Map briefly consume unscoped state. The acceptance path
